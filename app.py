@@ -1,0 +1,601 @@
+from flask import Flask, request, redirect, session
+import psycopg2
+import requests
+import os
+from werkzeug.utils import secure_filename
+
+# -------- DATABASE --------
+def db():
+    return psycopg2.connect(
+        host="localhost",
+        database="shopboss",
+        user="postgres",
+        password="123456789"
+    )
+
+def init_db():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        price INTEGER,
+        image TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT,
+        password TEXT
+    )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# -------- APP --------
+ShopBoss = Flask(__name__)
+ShopBoss.config["UPLOAD_FOLDER"] = "static/uploads"
+ShopBoss.secret_key = "secret123"
+
+# -------- COMMON FORM UI --------
+def form_ui(title, fields, button):
+    inputs = ""
+    for f in fields:
+        inputs += f
+
+    return f"""
+    <div style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f2f2f2;">
+        <form method="post" style="background:white;padding:30px;width:300px;">
+            <h2 style="text-align:center;">{title}</h2>
+            {inputs}
+            <button style="width:100%;padding:10px;background:#ffd814;border:none;">
+                {button}
+            </button>
+        </form>
+    </div>
+    """
+
+# -------- HEADER ----------
+def header():
+    cart = session.get("cart", {})
+    count = sum(cart.values())
+
+    return f"""
+    <div style="background:#131921;color:white;padding:10px;display:flex;align-items:center;">
+
+        <div style="color:#ff9900;font-size:22px;font-weight:bold;margin-right:20px;">
+            ShopBoss
+        </div>
+
+        <form action="/" method="get" style="flex:1;display:flex;margin:0 20px;">
+            <input name="q" placeholder="Search products"
+                   style="flex:1;padding:9px;border:none;font-size:13px;">
+            <button style="background:#febd69;border:none;padding:8px 20px;">
+                Search
+            </button>
+        </form>
+
+        <div style="display:flex;gap:20px;white-space:nowrap;">
+            <a href="/" style="color:white;text-decoration:none;">Home</a>
+            <a href="/cart" style="color:white;text-decoration:none;">Cart ({count})</a>
+            <a href="/admin" style="color:white;text-decoration:none;">Admin</a>
+            <a href="/signup" style="color:white;text-decoration:none;">SignUp</a>
+        </div>
+
+    </div>
+    """
+
+# -------- HOME --------
+@ShopBoss.route("/")
+def home():
+    query = request.args.get("q")
+
+    conn = db()
+    cur = conn.cursor()
+
+    if query:
+        cur.execute(
+            "SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s)",
+            ('%' + query + '%',)
+        )
+    else:
+        cur.execute("SELECT * FROM products")
+
+    products = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    html = header() + '<div style="display:flex;flex-wrap:wrap;padding:25px;background:#eaeded;">'
+
+    if not products:
+        html += "<h2 style='padding:20px;'>No products found</h2>"
+
+    for p in products:
+        html += f"""
+        <div style="background:white;width:120px;margin:10px;padding:20px;">
+            <img src="{p[3]}" style="width:100%;height:135px;">
+            <h4>{p[1]}</h4>
+            <b> ₹{p[2]}</b>
+            <a href="/add/{p[0]}" style="display:block;background:#ffd814;padding:10px;text-align:center;color:black;text-decoration:none">
+                Add to Cart
+            </a>
+        </div>
+        """
+
+    html += "</div>"
+    return html
+
+# -------- ADD --------
+@ShopBoss.route("/add/<int:id>")
+def add(id):
+    cart = session.get("cart", {})
+    cart[str(id)] = cart.get(str(id), 0) + 1
+    session["cart"] = cart
+    return redirect("/cart")
+
+# -------- CART --------
+@ShopBoss.route("/cart")
+def cart():
+    cart = session.get("cart", {})
+
+    conn = db()
+    cur = conn.cursor()
+
+    total = 0
+    html = header() + '<div style="display:flex;padding:30px;background:#eaeded;">'
+
+    html += '<div style="width:70%;">'
+
+    for pid, qty in cart.items():
+
+        cur.execute(
+            "SELECT * FROM products WHERE id=%s",
+            (pid,)
+        )
+
+        p = cur.fetchone()
+
+        if p:
+            subtotal = p[2] * qty
+            total += subtotal
+
+            html += f"""
+            <div style="background:white;margin:10px;padding:15px;display:flex;">
+                <img src="{p[3]}" style="width:150px;height:170px;margin-right:15px;">
+                <div>
+                    <h3>{p[1]}</h3>
+                    <p>₹{p[2]} × {qty}</p>
+
+<div style="margin:10px 0;">
+    <a href="/dec/{pid}" style="padding:5px 10px;background:#ddd;text-decoration:none;">-</a>
+    <a href="/inc/{pid}" style="padding:5px 10px;background:#ddd;text-decoration:none;">+</a>
+    <a href="/remove/{pid}" style="padding:5px 10px;background:green;color:white;text-decoration:none;">Delete</a>
+</div>
+
+<b>Subtotal: ₹{subtotal}</b>
+                </div>
+            </div>
+            """
+
+    html += "</div>"
+
+    html += f"""
+    <div style="width:30%;">
+        <div style="background:white;padding:20px;">
+            <h2>Subtotal</h2>
+            <h3>₹{total}</h3>
+            <a href="/address" style="display:block;background:#ffd814;padding:12px;text-align:center;color:black;text-decoration:none">
+                Proceed to Buy
+            </a>
+        </div>
+    </div>
+    """
+
+    html += "</div>"
+
+    cur.close()
+    conn.close()
+
+    return html
+
+# -------- INCREASE --------
+@ShopBoss.route("/inc/<id>")
+def inc(id):
+    cart = session.get("cart", {})
+    cart[id] = cart.get(id, 0) + 1
+    session["cart"] = cart
+    return redirect("/cart")
+
+# -------- DECREASE --------
+@ShopBoss.route("/dec/<id>")
+def dec(id):
+    cart = session.get("cart", {})
+
+    if id in cart:
+        cart[id] -= 1
+
+        if cart[id] <= 0:
+            del cart[id]
+
+    session["cart"] = cart
+    return redirect("/cart")
+
+# -------- DELETE --------
+@ShopBoss.route("/remove/<id>")
+def remove(id):
+    cart = session.get("cart", {})
+
+    if id in cart:
+        del cart[id]
+
+    session["cart"] = cart
+    return redirect("/cart")
+
+# -------- LOGIN --------
+@ShopBoss.route("/login", methods=["GET", "POST"])
+def login():
+
+    if request.method == "POST":
+
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT * FROM users WHERE username=%s AND password=%s",
+            (request.form["u"], request.form["p"])
+        )
+
+        user = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if user:
+            session["user"] = request.form["u"]
+            return redirect("/")
+
+        return "INVALID LOGIN"
+
+    return form_ui("----------User Login---------", [
+        '<input name="u" placeholder="Username" style="width:100%;padding:10px;margin:10px 0;" required>',
+        '<input name="p" type="password" placeholder="Password" style="width:100%;padding:10px;margin:10px 0;" required>'
+    ], "LOGIN")
+
+# -------- SIGNUP --------
+@ShopBoss.route("/signup", methods=["GET", "POST"])
+def signup():
+
+    if request.method == "POST":
+
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute(
+            "INSERT INTO users (username,password) VALUES (%s,%s)",
+            (request.form["u"], request.form["p"])
+        )
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return redirect("/login")
+
+    return form_ui("----------User Sign Up---------", [
+        '<input name="u" placeholder="Username" style="width:100%;padding:10px;margin:10px 0;" required>',
+        '<input name="p" type="password" placeholder="Password" style="width:100%;padding:10px;margin:10px 0;" required>'
+    ], "SIGN UP")
+
+# -------- ADMIN --------
+@ShopBoss.route("/admin", methods=["GET", "POST"])
+def admin():
+
+    if request.method == "POST":
+
+        if request.form["s"] in ["fayiz"]:
+            return redirect("/panel")
+
+    return form_ui("----------Admin Login---------", [
+        '<input name="s" type="password" placeholder="Secret Key" style="width:100%;padding:10px;margin:10px 0;" required>'
+    ], "LOGIN")
+
+# -------- PANEL --------
+@ShopBoss.route("/panel", methods=["GET","POST"])
+def panel():
+
+    conn = db()
+    cur = conn.cursor()
+
+    if request.method == "POST":
+
+        # -------- ADD PRODUCT --------
+        if "add" in request.form:
+
+            cur.execute(
+                "INSERT INTO products (name,price,image) VALUES (%s,%s,%s)",
+                (
+                    request.form["name"],
+                    request.form["price"],
+                    request.form["image"]
+                )
+            )
+
+        # -------- UPDATE PRODUCT --------
+        elif "update" in request.form:
+
+            cur.execute(
+                "UPDATE products SET name=%s, price=%s, image=%s WHERE id=%s",
+                (
+                    request.form["name"],
+                    request.form["price"],
+                    request.form["image"],
+                    request.form["id"]
+                )
+            )
+
+        # -------- DELETE PRODUCT --------
+        elif "delete" in request.form:
+
+            cur.execute(
+                "DELETE FROM products WHERE id=%s",
+                (request.form["id"],)
+            )
+
+        conn.commit()
+
+    cur.execute("SELECT * FROM products")
+    products = cur.fetchall()
+
+    html = header() + """
+    <div style="padding:30px;background:#eaeded;font-family:Arial;">
+
+        <h2 style="margin-bottom:20px;">Admin Panel</h2>
+
+        <!-- ADD PRODUCT -->
+        <div style="background:white;padding:20px;margin-bottom:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.1);">
+
+            <h3>Add Product</h3>
+
+            <form method="post" style="display:flex;gap:10px;flex-wrap:wrap;">
+
+                <input name="name" placeholder="Product Name" required style="padding:8px;flex:1;">
+
+                <input name="price" placeholder="Price" required style="padding:8px;width:120px;">
+
+                <input name="image" placeholder="Image URL" required style="padding:8px;flex:2;">
+
+                <button name="add" style="background:#ffd814;border:none;padding:10px 20px;cursor:pointer;">
+                    Add Product
+                </button>
+
+            </form>
+
+        </div>
+
+        <!-- PRODUCTS GRID -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:15px;">
+    """
+
+    for p in products:
+
+        html += f"""
+        <div style="background:white;padding:15px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.1);">
+
+            <img src="{p[3]}" style="width:100%;height:180px;object-fit:cover;border-radius:5px;">
+
+            <form method="post" style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">
+
+                <input type="hidden" name="id" value="{p[0]}">
+
+                <input name="name" value="{p[1]}" style="padding:6px;">
+                <input name="price" value="{p[2]}" style="padding:6px;">
+                <input name="image" value="{p[3]}" style="padding:6px;">
+
+                <div style="display:flex;gap:10px;">
+
+                    <button name="update" style="flex:1;background:#ffa41c;border:none;padding:8px;cursor:pointer;">
+                        Update
+                    </button>
+
+                    <button name="delete" style="flex:1;background:#d32f2f;color:white;border:none;padding:8px;cursor:pointer;">
+                        Delete
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+        """
+
+    html += """
+        </div>
+    </div>
+    """
+
+    cur.close()
+    conn.close()
+
+    return html
+
+# -------- ADDRESS --------
+@ShopBoss.route("/address", methods=["GET","POST"])
+def address():
+
+    if not session.get("cart"):
+        return redirect("/")
+
+    if request.method == "POST":
+
+        if "user" not in session:
+            return redirect("/login")
+
+        mobile = request.form.get("mobile", "").strip()
+        address = request.form.get("address", "").strip()
+        payment = request.form.get("payment", "").strip()
+
+        if not mobile.isdigit() or len(mobile) != 10:
+            return "<h3 style='color:red;'>❌ Enter valid 10-digit mobile number</h3><a href='/address'>Go Back</a>"
+
+        if not address:
+            return "<h3 style='color:red;'>❌ Address required</h3><a href='/address'>Go Back</a>"
+
+        message = f""" You Received A New Order
+
+User: {session.get('user')}
+
+Mobile: {mobile}
+
+Address: {address}
+
+Payment: {payment}
+
+Items:
+"""
+
+        conn = db()
+        cur = conn.cursor()
+
+        total = 0
+
+        for pid, qty in session.get("cart", {}).items():
+
+            cur.execute(
+                "SELECT name, price FROM products WHERE id=%s",
+                (pid,)
+            )
+
+            p = cur.fetchone()
+
+            if p:
+
+                name, price = p
+
+                total += price * qty
+
+                message += f"{name} (₹{price}) - Qty: {qty}\n"
+
+        cur.close()
+        conn.close()
+
+        message += f"Total: ₹{total}"
+
+        r = requests.post(
+            "https://api.emailjs.com/api/v1.0/email/send",
+            headers={"Content-Type": "application/json"},
+            json={
+                "service_id": "service_shopboss",
+                "template_id": "template_shopboss",
+                "user_id": "9bTfVOFVe_u1Mt51L",
+                "template_params": {
+                    "name": session.get("user"),
+                    "email": "kfayizwani@gmail.com",
+                    "message": message
+                }
+            }
+        )
+
+        print(r.text)
+
+        session["cart"] = {}
+
+        return f"""
+        <div style="background:#eaeded;height:100vh;display:flex;justify-content:center;align-items:center;">
+            <div style="background:white;padding:40px;width:500px;border-radius:10px;text-align:center;">
+
+                <div style="font-size:60px;color:green;">✔</div>
+
+                <h2 style="color:#067d62;">Order Placed Successfully</h2>
+
+                <p><b>Mobile:</b> {mobile}</p>
+                <p><b>Total Paid:</b> ₹{total}</p>
+
+                <a href="/" style="display:inline-block;margin-top:20px;background:#ffd814;padding:12px 20px;color:black;text-decoration:none;">
+                    Continue Shopping
+                </a>
+
+            </div>
+        </div>
+        """
+
+    return """
+<div style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f2f2f2;">
+    <form method="post" style="background:white;padding:30px;width:350px;">
+
+        <h2 style="text-align:center;">Checkout</h2>
+
+        <input name="mobile" placeholder="Enter Mobile Number"
+        style="width:100%;margin:10px 0;padding:8px;" required>
+
+        <input name="address" placeholder="Enter Address"
+        style="width:100%;margin:10px 0;padding:8px;" required>
+
+        <h3>Payment Options</h3>
+
+        <div style="margin:10px 0;">
+            <input type="radio" name="payment" value="Cash on Delivery" onclick="codSelected()" required> Cash on Delivery<br><br>
+
+            <input type="radio" name="payment" value="Online Payment" onclick="showQR()"> Online Payment
+        </div>
+
+        <div id="qrBox" style="display:none;text-align:center;">
+            <img src="/static/qr.png" style="width:200px;margin-top:10px;">
+            <p>Scan & Pay</p>
+
+            <button type="button" onclick="confirmPayment()"
+            style="background:#ffd814;color:black;padding:8px;border:none;">
+                Confirm Payment
+            </button>
+        </div>
+
+        <button id="placeOrderBtn"
+        style="width:100%;padding:10px;margin-top:15px;background:#ffd814;border:none;">
+            Place Order
+        </button>
+
+    </form>
+</div>
+
+<script>
+let paid = false;
+
+function showQR(){
+    document.getElementById("qrBox").style.display = "block";
+    document.getElementById("placeOrderBtn").disabled = true;
+}
+
+function confirmPayment(){
+    paid = true;
+    document.getElementById("placeOrderBtn").disabled = false;
+    alert("Payment Confirmed ✅");
+}
+
+function codSelected(){
+    document.getElementById("qrBox").style.display = "none";
+    document.getElementById("placeOrderBtn").disabled = false;
+}
+
+document.querySelector("form").onsubmit = function(){
+
+    let p = document.querySelector('input[name="payment"]:checked');
+
+    if(p && p.value === "Online Payment" && !paid){
+        alert("Confirm QR payment first!");
+        return false;
+    }
+}
+</script>
+"""
+
+# -------- RUN --------
+if __name__ == "__main__":
+    init_db()
+    ShopBoss.run()
