@@ -300,7 +300,7 @@ def admin():
 
     if request.method == "POST":
 
-        if request.form["s"] in ["fayiz"]:
+        if request.form["s"] in ["fayiz123"]:
             return redirect("/panel")
 
     return form_ui("----------Admin Login---------", [
